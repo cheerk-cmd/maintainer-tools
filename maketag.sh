@@ -110,7 +110,8 @@ export GIT_COMMITTER_EMAIL="$git_email"
 
 while read type name url; do
 	case "$type" in
-		src-git)
+		src-git|\
+		src-git-full)
 			case "$url" in
 				*^*)  sha1="${url##*^}" ;;
 				*\;*) sha1="$(git ls-remote "${url%;*}" "${url##*;}")" ;;

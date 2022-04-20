@@ -104,7 +104,8 @@ git checkout -b "${distname_lc}-$version"
 
 while read type name url; do
 	case "$type" in
-		src-git)
+		src-git|\
+		src-git-full)
 			case "$url" in
 				*^*|*\;*) : ;;
 				*)
