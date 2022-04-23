@@ -4,7 +4,7 @@ git_author="$(git config user.name)"
 git_email="$(git config user.email)"
 gpg_keyid=""
 
-base_url="http://downloads.openwrt.org/releases"
+base_url="https://downloads.openwrt.org/releases"
 
 [ -f "./feeds.conf.default" ] || {
 	echo "Please execute as ./${0##*/}" >&2

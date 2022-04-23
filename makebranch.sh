@@ -3,7 +3,7 @@
 git_author="Release System"
 git_email="lede-dev@lists.infradead.org"
 
-base_url="http://downloads.openwrt.org/releases"
+base_url="https://downloads.openwrt.org/releases"
 
 [ -f "./feeds.conf.default" ] || {
 	echo "Please execute as ./${0##*/}" >&2
