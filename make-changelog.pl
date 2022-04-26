@@ -2,8 +2,9 @@
 
 use strict;
 use warnings;
+use JSON;
+use Time::Local;
 use Text::CSV;
-use HTML::TreeBuilder;
 
 my $range = $ARGV[0];
 our $workdir = './openwrt-changelog-data';
@@ -235,9 +236,15 @@ if (@bugs > 0) {
 
 	foreach my $bug (@bugs)
 	{
-		printf "=== #%d ===\n", $bug->id;
+		if ($bug->fsid) {
+			printf "=== FS#%d (#%d) ===\n", $bug->fsid, $bug->id;
+		}
+		else {
+			printf "=== #%d ===\n", $bug->id;
+		}
+
 		printf "**Description:** <nowiki>%s</nowiki>\\\\\n", $bug->summary;
-		printf "**Link:** [[https://bugs.openwrt.org/index.php?do=details&task_id=%d]]\\\\\n", $bug->id;
+		printf "**Link:** [[https://github.com/openwrt/openwrt/issues/%d]]\\\\\n", $bug->id;
 		printf "**Commits:**\\\\\n";
 
 		foreach my $commit (@{$bugs{ $bug->id }})
@@ -308,133 +315,235 @@ sub err {
 }
 
 
-package BugTracker;
-
-our $inst;
+package GitHubQuery;
 
 sub _date {
 	my ($self, $ts) = @_;
 	my @loc = gmtime $ts;
-	return sprintf '%04d-%02d-%02d', $loc[5] + 1900, $loc[4] + 1, $loc[3];
+	return sprintf '%04d-%02d-%02dT%02d:%02d:%02dZ',
+		$loc[5] + 1900, $loc[4] + 1, $loc[3],
+		$loc[2], $loc[1], $loc[0];
+}
+
+sub _ts {
+	my ($self, $date) = @_;
+	return 0 unless $date;
+
+	my ($year, $mon, $mday, $hour, $min, $sec) = $date =~ m!^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$!;
+	return Time::Local::timegm_posix($sec, $min, $hour, $mday, $mon - 1, $year - 1900);
+}
+
+sub _read_cache {
+	my ($self, $path, $records) = @_;
+
+	if (open my $file, '<:utf8', $path) {
+		local $/;
+
+		eval {
+			push @$records, @{ JSON::decode_json(readline $file) };
+		};
+
+		close $file;
+
+		if ($@) {
+			return Log::err("Unable to read $path: $@");
+		}
+	}
+
+	return 0;
+}
+
+sub _fetch_one_page {
+	my ($self, $since, $page) = @_;
+	my $url = $self->{'url'};
+	my $sep = ($url =~ m!\?!) ? '&' : '?';
+	my $res;
+
+	if ($since) {
+		$url .= $sep . 'since=' . $self->_date($since);
+		$sep = '&';
+	}
+
+	if ($page) {
+		$url .= $sep . 'per_page=100&page=' . $page;
+		$sep = '&';
+	}
+
+	if (open my $wget, '-|', 'wget', '--auth-no-challenge', '-q', '-O', '-', $url) {
+		local $/;
+
+		eval {
+			$res = JSON::decode_json(readline $wget);
+		};
+
+		if ($@) {
+			Log::err("Failed to parse result from $url: $@");
+		}
+
+		close $wget;
+	}
+	else {
+		Log::err("Failed to fetch $url via wget: $!");
+	}
+
+	return $res;
 }
 
 sub _fetch {
 	my ($self) = @_;
 
-	return 0 if $self->{'fetched'};
+	my $cache = "$main::workdir/" . $self->{'cachefile'};
+	my @stat = stat $cache;
+	my $since = defined($stat[9]) ? $stat[9] : $self->{'since'}; $since -= ($since % 86400);
+	my @new_records;
+	my @old_records;
+	my $page = 1;
 
-	my @stat = stat "$main::workdir/buginfo.csv";
-	my $since = defined($stat[9]) ? $stat[9] : 86400; $since -= ($since % 86400);
-	my $sdate = $self->_date($since - 86400);
+	Log::info("Updating " . $self->{'cachefile'} . " database...");
 
-	Log::info("Updating bug database...");
+	while (1) {
+		my $res = $self->_fetch_one_page($since, $page);
 
-	if (system('wget', '-qO', "$main::workdir/buginfo-delta.csv",
-	           "https://bugs.openwrt.org/index.php?string=&project=2&do=index&export_list=Export+Tasklist&advancedsearch=on&type%5B%5D=&sev%5B%5D=&pri%5B%5D=&due%5B%5D=&reported%5B%5D=&cat%5B%5D=&status%5B%5D=&percent%5B%5D=&opened=&dev=&closed=&duedatefrom=&duedateto=&changedfrom=$sdate&changedto=&openedfrom=&openedto=&closedfrom=&closedto=")) {
-		return Log::err('Unable to fetch database changes!');
+		if (ref($res) ne 'ARRAY') {
+			return Log::err("Aborting update due to invalid response");
+		}
+
+		push @new_records, @$res;
+
+		Log::info("  Fetched " . @new_records . " records...");
+
+		last if @$res < 100;
+
+		$page++;
 	}
 
-	$self->_update($since);
+	if ($self->_read_cache($cache, \@old_records)) {
+		return 1;
+	}
 
-	$self->{'fetched'}++;
+	my $updated = 0;
+	my %index;
+
+	foreach my $record (@old_records) {
+		if (ref($record) ne 'HASH' || !exists($record->{ $self->{'idprop'} })) {
+			next;
+		}
+
+		$index{ $record->{ $self->{'idprop'} } } = $record;
+	}
+
+	foreach my $record (@new_records) {
+		if (ref($record) ne 'HASH' || !exists($record->{ $self->{'idprop'} })) {
+			next;
+		}
+
+		my $old = $index{ $record->{ $self->{'idprop'} } };
+
+		if (!$old || $self->_ts($record->{'updated_at'}) != $self->_ts($old->{'updated_at'})) {
+			$index{ $record->{ $self->{'idprop'} } } = $record;
+			$updated++;
+		}
+	}
+
+	if (!defined($stat[9]) || $updated) {
+		Log::info("  Found " . $updated . " updated records...");
+
+		if (open my $file, '>:utf8', $cache) {
+			print $file JSON::encode_json([ values %index ]);
+			close $file;
+		}
+		else {
+			return Log::err("Unable to update $cache: $!");
+		}
+
+		my $now = time();
+
+		if (!utime($now, $now, $cache)) {
+			Log::warn("Unable to change $cache modification time: $!");
+		}
+	}
 
 	return 0;
 }
 
-sub _update {
-	my ($self) = @_;
-	my %records;
+sub fetch {
+	my ($self, $force_update) = @_;
+	my $cache = "$main::workdir/" . $self->{'cachefile'};
+	my @records;
 
-	my $csv = Text::CSV->new({
-		'binary' => 1,
-		'allow_loose_quotes' => 1
-	});
-
-	if (open my $file, '<', "$main::workdir/buginfo.csv") {
-		while (defined(my $row = $csv->getline($file))) {
-			next if $row->[0] eq 'ID';
-			$row->[13] = 0 unless defined $row->[13];
-			$records{$row->[0]} = $row;
-		}
-
-		close $file;
+	if ($force_update) {
+		$self->_fetch();
 	}
 
-	if (open my $file, '<', "$main::workdir/buginfo-delta.csv") {
-		my $changed = 0;
-		my $now = time();
-
-		while (defined(my $row = $csv->getline($file))) {
-			next if $row->[0] eq 'ID';
-			$changed++;
-			$row->[13] = $now;
-			$records{$row->[0]} = $row;
-		}
-
-		close $file;
-
-		if ($changed) {
-			if (open $file, '>:utf8', "$main::workdir/buginfo.csv") {
-				foreach my $id (sort { $a <=> $b } keys %records) {
-					$csv->print($file, $records{$id});
-					print $file "\n";
-				}
-				close $file;
-			}
-
-			if (!utime($now, $now, "$main::workdir/buginfo.csv")) {
-				Log::warn("Unable to change modification time: $!");
-			}
-
-			Log::info("Found %d updated bugs", $changed);
-		}
+	if (-f $cache && $self->_read_cache($cache, \@records)) {
+		return undef;
 	}
+
+	return wantarray ? @records : \@records;
 }
+
+sub new {
+	my ($pack, $baseurl, $cachefile, $idprop, $since) = @_;
+
+	return bless {
+		url       => $baseurl,
+		cachefile => $cachefile,
+		idprop    => $idprop,
+		since     => $since
+	}, $pack;
+}
+
+
+package BugTracker;
+
+our $inst;
 
 sub _parse {
 	my ($self) = @_;
 
 	return 0 if $self->{'bugs'};
-	return 1 if $self->_fetch;
+
+	my $issues = GitHubQuery->new(
+		"https://api.github.com/repos/openwrt/openwrt/issues?state=all&sort=updated&direction=desc",
+		"issues.json",
+		"number",
+		1640995200
+	)->fetch(1);
+
+	return 1 unless $issues;
 
 	$self->{'bugs'} = { };
+	$self->{'fsbugs'} = { };
 
-	my $csv = Text::CSV->new({
-		'binary' => 1,
-		'allow_loose_quotes' => 1
-	});
+	foreach my $issue (@$issues) {
+		my ($date_opened, $date_closed, $date_modified) = (0, 0, 0);
 
-	if (open my $file, '<', "$main::workdir/buginfo.csv") {
-		while (defined(my $row = $csv->getline($file))) {
-			next if $row->[0] eq 'ID';
-
-			my ($date_opened, $date_closed, $date_modified) = (0, 0, 0);
-
-			if (defined($row->[7]) && $row->[7] =~ m!^(\d+)$!) {
-				$date_opened = int($1);
-			}
-
-			if (defined($row->[8]) && $row->[8] =~ m!^(\d+)$!) {
-				$date_closed = int($1);
-			}
-
-			if (defined($row->[13]) && $row->[13] =~ m!^(\d+)$!) {
-				$date_modified = int($1);
-			}
-
-			my $bug = Bug->new(
-				$row->[0],
-				$row->[4],
-				lc(($date_closed > $date_opened) ? 'Closed' : $row->[5]),
-				$date_opened,
-				$date_closed,
-				$date_modified
-			);
-
-			$self->{'bugs'}{ $bug->id } = $bug;
+		if (exists($issue->{'created_at'})) {
+			$date_opened = GitHubQuery->_ts($issue->{'created_at'});
 		}
 
-		close $file;
+		if (exists($issue->{'updated_at'})) {
+			$date_modified = GitHubQuery->_ts($issue->{'updated_at'});
+		}
+
+		if (exists($issue->{'closed_at'})) {
+			$date_closed = GitHubQuery->_ts($issue->{'closed_at'});
+		}
+
+		my $bug = Bug->new(
+			$issue->{'number'},
+			$issue->{'title'},
+			$issue->{'state'},
+			$date_opened,
+			$date_closed,
+			$date_modified
+		);
+
+		$self->{'bugs'}{ $bug->id } = $bug;
+
+		if ($issue->{'title'} =~ /^FS#(\d+) - /) {
+			$self->{'fsbugs'}{$1} = $bug;
+		}
 	}
 
 	return 0;
@@ -457,6 +566,13 @@ sub get($$) {
 	return $self->{'bugs'}{$id};
 }
 
+sub get_fs($$) {
+	my ($self, $id) = @_;
+
+	return undef if $self->_parse;
+	return $self->{'fsbugs'}{$id};
+}
+
 sub bugs($) {
 	my ($self) = @_;
 	return undef if $self->_parse;
@@ -476,25 +592,34 @@ use constant {
 	'_OPEN'   => 3,
 	'_CLOSE'  => 4,
 	'_CHANGE' => 5,
-	'_REFS'   => 6
+	'_FSID'   => 6,
+	'_REFS'   => 7
 };
 
 sub new
 {
 	my ($pack, $id, $summary, $status, $opened, $closed, $modified) = @_;
+	my $fsid = undef;
+
+	if ($summary =~ s/^FS#(\d+) - //) {
+		$fsid = $1;
+	}
+
 	return bless [
 		$id,
 		$summary,
 		$status,
 		$opened,
 		$closed,
-		$modified
+		$modified,
+		$fsid
 	], $pack;
 }
 
 sub id { shift->[_ID] }
-sub url { sprintf 'https://bugs.openwrt.org/index.php?do=details&task_id=%d', shift->id }
-sub file { sprintf '%s/ticket/%d.html', $main::workdir, shift->id }
+sub fsid { shift->[_FSID] }
+sub url { sprintf 'https://api.github.com/repos/openwrt/openwrt/issues/%d/comments', shift->id }
+sub file { sprintf '%s/issue/%d.json', $main::workdir, shift->id }
 sub summary { shift->[_SUM] }
 sub status { shift->[_STAT] }
 
@@ -502,73 +627,61 @@ sub _fetch()
 {
 	my ($self) = @_;
 	my @stat = stat $self->file;
+	my $refresh = 0;
 
-	if (defined($stat[9]) && ($stat[9] >= $self->[_CHANGE])) {
-		return 0;
+	if (!defined($stat[9]) || ($stat[9] < $self->[_CHANGE])) {
+		$refresh = 1;
 	}
 
-	Log::info("Fetching details for Bug #%d ...", $self->id);
+	#Log::info("Fetching details for Bug #%d ...", $self->id);
 
-	if (system('mkdir', '-p', File::Basename::dirname($self->file))) {
+	if (system('mkdir', '-p', "$main::workdir/issue")) {
 		return Log::err("Unable to create directory!");
 	}
-	elsif (system('wget', '-q', '-O', $self->file, $self->url)) {
-		return Log::err("Unable to fetch bug details!");
-	}
-	elsif (!utime($self->[_CHANGE], $self->[_CHANGE], $self->file)) {
-		return LOG::warn("Unable to change modification time: $!");
+
+	my $comments = GitHubQuery->new(
+		$self->url,
+		sprintf('issue/%d.json', $self->id),
+		'id',
+		0
+	)->fetch($refresh);
+
+	if (!$comments) {
+		Log::err("Unable to fetch bug details!");
+
+		return undef;
 	}
 
-	return 0;
+	return wantarray ? @$comments : $comments;
 }
 
 sub _find_commit_references()
 {
 	my ($self) = @_;
+	my $comments = $self->_fetch;
 
-	return undef if $self->_fetch;
+	return undef unless $comments;
 
-	eval {
-		my $tree = HTML::TreeBuilder->new_from_file($self->file);
+	foreach my $comment (@$comments) {
+		my $str = $comment->{'body'};
+		my @refs = $str =~ m!
+			(?:
+				Fixed \s+ with \s+ |
+				Fixed \s+ in \s+ |
+				Fixed \s+ by \s+ |
+				fix \s+ (?: in | into ) \s+ (?: \w+ \s+ )*
+			)
+			(?: <a \s+ href=" )?  # "
+			\b (
+				https?://git\.(?:openwrt|lede-project)\.org/\?p=[\w/]+\.git\S*;h=[a-fA-F0-9]{4,40} |
+				https?://git\.(?:openwrt|lede-project)\.org/[a-fA-F0-9]{4,40} |
+				https?://github\.com/[^/]+/commit/[a-fA-F0-9]{4,40} |
+				[a-fA-F0-9]{7,40}
+			) \b
+		!ixg;
 
-		my $closed = $tree->look_down('id' => 'taskclosed');
-		if ($closed) {
-			my $str = $closed->as_HTML;
-			if ($str =~ m!<strong>Reason for closing:</strong>[^\n]+\bFixed\b!) {
-				$str =~ s!\n!!g;
-				$str =~ s!<! <!g;
-
-				my @refs = $str =~ m!\b (
-					https?://git\.(?:openwrt|lede-project)\.org/\?p=[\w/]+\.git\S*;h=[a-fA-F0-9]{4,40} |
-					https?://git\.(?:openwrt|lede-project)\.org/[a-fA-F0-9]{4,40} |
-					https?://github\.com/[^/]+/commit/[a-fA-F0-9]{4,40} |
-					[a-fA-F0-9]{7,40}
-				) \b!x;
-
-				return @refs if @refs > 0;
-			}
-		}
-
-		foreach my $comment (reverse $tree->look_down('class' => 'commenttext')) {
-			my $str = $comment->as_HTML;
-			my @refs = $str =~ m!
-				(?:
-					Fixed \s+ with \s+ |
-					Fixed \s+ in \s+ |
-					fix \s+ (?: in | into ) \s+ (?: \w+ \s+ )*
-				)
-				(?: <a \s+ href=" )?  # "
-				\b (
-					https?://git\.(?:openwrt|lede-project)\.org/\?p=[\w/]+\.git\S*;h=[a-fA-F0-9]{4,40} |
-					https?://git\.(?:openwrt|lede-project)\.org/[a-fA-F0-9]{4,40} |
-					https?://github\.com/[^/]+/commit/[a-fA-F0-9]{4,40} |
-					[a-fA-F0-9]{7,40}
-				) \b
-			!ixg;
-
-			return @refs if @refs > 0;
-		}
-	};
+		return @refs if @refs > 0;
+	}
 }
 
 sub refs ($) {
@@ -627,10 +740,10 @@ sub _fetch($) {
 
 	if (-d $self->directory) {
 		Log::info("Updating repository %s ...", $self->url);
-		
+
 		my $tree = $self->directory;
 		my $git  = $tree . '/.git';
-		
+
 		if (system('git', "--work-tree=$tree", "--git-dir=$git", 'fetch', '--all', '--quiet')) {
 			return Log::err("Unable to pull repository!");
 		}
@@ -931,12 +1044,42 @@ sub bugs($) {
 
 	my $bugtracker = BugTracker->new;
 	my $candidates = qr'\b((?:[Pp]ull [Rr]equest |[Bb]ug |[Ii]ssue |PR |FS |GH |PR|FS|GH)#\d+)\b';
-	my $issue = qr'(?i)^(?:Bug |Issue |FS |GH |FS|GH)#(\d+)$';
 	my %bugs;
 
 	foreach my $match ($self->subject =~ /$candidates/g, $self->body =~ /$candidates/g) {
-		if ($match =~ $issue) {
-			my $bug = $bugtracker->get($1);
+		my $bug;
+
+		if ($match =~ /^FS ?#(\d+)$/) {
+			$bug = $bugtracker->get_fs($1);
+		}
+		elsif ($match =~ /^(GH|PR|[Pp]ull [Rr]equest) ?#(\d+)$/i) {
+			$bug = $bugtracker->get($1);
+		}
+		elsif ($match =~ /^#(\d+)$/) {
+			$bug = $bugtracker->get_fs($1) || $bugtracker->get($1);
+		}
+
+		if ($bug) {
+			$bugs{ $bug->id } = $bug;
+		}
+	}
+
+	foreach my $tag (qw(Fixes Closes Supersedes)) {
+		my ($ids) = $self->body =~ /\b$tag: *((?:GH|PR|FS|)#\d+(?:[, ]+#\d+)*)/;
+
+		foreach my $id (split /[, ]+/, ($ids || '')) {
+			my $bug;
+
+			if ($id =~ /^FS#(\d+)$/) {
+				$bug = $bugtracker->get_fs($1);
+			}
+			elsif ($id =~ /^(GH|PR)#(\d+)$/) {
+				$bug = $bugtracker->get($1);
+			}
+			elsif ($id =~ /^#(\d+)$/) {
+				$bug = $bugtracker->get_fs($1) || $bugtracker->get($1);
+			}
+
 			if ($bug) {
 				$bugs{ $bug->id } = $bug;
 			}
