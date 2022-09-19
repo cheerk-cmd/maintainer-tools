@@ -41,12 +41,12 @@ fi
 
 if [ "$(echo "$PR_INFO" | jq -r ".maintainer_can_modify")" == "false" ]; then
 	echo "PR #$PRID can't be force pushed by maintainers. Can't merge this PR!" >&2
-	echo 4
+	exit 4
 fi
 
 if [ "$(echo "$PR_INFO" | jq -r ".mergeable")" == "false" ]; then
 	echo "PR #$PRID is not mergeable for Github.com. Check the PR!" >&2
-	echo 5
+	exit 5
 fi
 
 echo "Pulling current $BRANCH from origin"
@@ -55,7 +55,7 @@ $GIT fetch origin
 
 if ! $GIT rebase origin/$BRANCH; then
 	echo "Failed to rebase $BRANCH with origin/$BRANCH" >&2
-	echo 7
+	exit 7
 fi
 
 PR_USER="$(echo "$PR_INFO" | jq -r ".head.user.login")"
@@ -73,19 +73,19 @@ $GIT fetch $PR_USER
 echo "Creating branch $PR_BRANCH"
 if ! $GIT checkout -b $PR_BRANCH $PR_USER/$PR_BRANCH; then
 	echo "Failed to checkout new branch $PR_BRANCH from $PR_USER/$PR_BRANCH" >&2
-	echo 8
+	exit 8
 fi
 
 echo "Rebasing $PR_BRANCH on top of $BRANCH"
 if ! $GIT rebase origin/$BRANCH; then
 	echo "Failed to rebase $PR_BRANCH with origin/$BRANCH" >&2
-	echo 9
+	exit 9
 fi
 
 echo "Force pushing $PR_BRANCH to $PR_USER"
 if ! $GIT push $PR_USER HEAD --force; then
 	echo "Failed to force push HEAD to $PR_USER" >&2
-	echo 10
+	exit 10
 fi
 
 echo "Returning to $BRANCH"
@@ -94,13 +94,13 @@ $GIT checkout $BRANCH
 echo "Actually merging the PR #$PRID from branch $PR_USER/$PR_BRANCH"
 if ! $GIT merge --ff-only $PR_USER/$PR_BRANCH; then
 	echo "Failed to merge $PR_USER/$PR_BRANCH on $BRANCH" >&2
-	echo 11
+	exit 11
 fi
 
 echo "Pushing to openwrt git server"
 if ! $GIT push; then
 	echo "Failed to push to $BRANCH but left branch as is." >&2
-	echo 12
+	exit 12
 fi
 
 echo "Deleting branch $PR_BRANCH"
