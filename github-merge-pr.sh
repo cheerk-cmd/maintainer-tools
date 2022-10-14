@@ -60,6 +60,7 @@ fi
 
 PR_USER="$(echo "$PR_INFO" | jq -r ".head.user.login")"
 PR_BRANCH="$(echo "$PR_INFO" | jq -r ".head.ref")"
+LOCAL_PR_BRANCH="$PR_BRANCH"-"$PR_USER"
 PR_REPO="$(echo "$PR_INFO" | jq -r ".head.repo.html_url")"
 
 if ! $GIT remote get-url $PR_USER &> /dev/null || [ -n "$DRY_RUN" ]; then
@@ -70,20 +71,20 @@ fi
 echo "Fetching remote $PR_USER"
 $GIT fetch $PR_USER
 
-echo "Creating branch $PR_BRANCH"
-if ! $GIT checkout -b $PR_BRANCH $PR_USER/$PR_BRANCH; then
+echo "Creating branch $LOCAL_PR_BRANCH for $PR_BRANCH"
+if ! $GIT checkout -b $LOCAL_PR_BRANCH $PR_USER/$PR_BRANCH; then
 	echo "Failed to checkout new branch $PR_BRANCH from $PR_USER/$PR_BRANCH" >&2
 	exit 8
 fi
 
-echo "Rebasing $PR_BRANCH on top of $BRANCH"
+echo "Rebasing $LOCAL_PR_BRANCH on top of $BRANCH"
 if ! $GIT rebase origin/$BRANCH; then
 	echo "Failed to rebase $PR_BRANCH with origin/$BRANCH" >&2
 	exit 9
 fi
 
-echo "Force pushing $PR_BRANCH to $PR_USER"
-if ! $GIT push $PR_USER HEAD --force; then
+echo "Force pushing $LOCAL_PR_BRANCH to HEAD:$PR_BRANCH for $PR_USER"
+if ! $GIT push $PR_USER HEAD:$PR_BRANCH --force; then
 	echo "Failed to force push HEAD to $PR_USER" >&2
 	exit 10
 fi
@@ -103,8 +104,8 @@ if ! $GIT push; then
 	exit 12
 fi
 
-echo "Deleting branch $PR_BRANCH"
-$GIT branch -D $PR_BRANCH
+echo "Deleting branch $LOCAL_PR_BRANCH"
+$GIT branch -D $LOCAL_PR_BRANCH
 
 # Default close comment
 COMMENT="Thanks! Rebased on top of $BRANCH and merged!"
