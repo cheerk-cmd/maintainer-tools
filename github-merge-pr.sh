@@ -107,6 +107,11 @@ fi
 echo "Returning to $BRANCH"
 $GIT checkout $BRANCH
 
+if [ -n "$($GIT log origin/$BRANCH..HEAD)" ]; then
+	echo "Working on dirty branch for $BRANCH! Please reset $BRANCH to origin/$BRANCH" >&2
+	exit 10
+fi
+
 echo "Actually merging the PR #$PRID from branch $PR_USER/$PR_BRANCH"
 if ! $GIT merge --ff-only $PR_USER/$PR_BRANCH; then
 	echo "Failed to merge $PR_USER/$PR_BRANCH on $BRANCH" >&2
