@@ -15,6 +15,21 @@ BRANCH="${2:-master}"
 DRY_RUN="$3"
 GIT=git
 
+yesno() {
+	local prompt="$1"
+	local default="${2:-n}"
+	local input
+
+	while [ 1 ]; do
+		printf "%s y/n [%s] > " "$prompt" "$default"
+		read input
+		case "${input:-$default}" in
+			y*) return 0 ;;
+			n*) return 1 ;;
+		esac
+	done
+}
+
 if ! command -v jq &> /dev/null; then
 	echo "jq could not be found! This script require jq!"
 	exit 1
@@ -98,48 +113,51 @@ if ! $GIT merge --ff-only $PR_USER/$PR_BRANCH; then
 	exit 11
 fi
 
-echo "Pushing to openwrt git server"
-if ! $GIT push; then
-	echo "Failed to push to $BRANCH but left branch as is." >&2
-	exit 12
+if yesno "Push to openwrt $BRANCH" "y"; then
+	echo "Pushing to openwrt git server"
+	if ! $GIT push; then
+		echo "Failed to push to $BRANCH but left branch as is." >&2
+		exit 12
+	fi
+
+	# Default close comment
+	COMMENT="Thanks! Rebased on top of $BRANCH and merged!"
+
+	if [ -n "$TOKEN" ] && [ -z "$DRY_RUN" ]; then
+		echo ""
+		echo "Enter a comment and hit <enter> to close the PR at Github automatically now."
+		echo "Hit <ctrl>-<c> to exit."
+		echo ""
+		echo "If you do not provide a comment, the default will be: "
+		echo "[$COMMENT]"
+
+		echo -n "Comment > "
+		read usercomment
+
+		echo "Sending message to PR..."
+
+		comment="${usercomment:-$COMMENT}"
+		comment="${comment//\\/\\\\}"
+		comment="${comment//\"/\\\"}"
+		comment="$(printf '{"body":"%s"}' "$comment")"
+
+		if ! curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" --user "$TOKEN:x-oauth-basic" --request POST --data "$comment" "https://api.github.com/repos/$REPO/issues/$PRID/comments" || \
+		! curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" --user "$TOKEN:x-oauth-basic" --request PATCH --data '{"state":"closed"}' "https://api.github.com/repos/$REPO/pulls/$PRID"
+		then
+			echo ""                                                     >&2
+			echo "Something failed while sending comment to the PR via ">&2
+			echo "the Github API, please review the state manually at " >&2
+			echo "https://github.com/$REPO/pull/$PRID"                  >&2
+			exit 6
+		fi
+	fi
+
+	echo -e "\n"
+	echo "The PR has been merged!"
+	echo -e "\n"
 fi
 
 echo "Deleting branch $LOCAL_PR_BRANCH"
 $GIT branch -D $LOCAL_PR_BRANCH
-
-# Default close comment
-COMMENT="Thanks! Rebased on top of $BRANCH and merged!"
-
-if [ -n "$TOKEN" ] && [ -z "$DRY_RUN" ]; then
-	echo ""
-	echo "Enter a comment and hit <enter> to close the PR at Github automatically now."
-	echo "Hit <ctrl>-<c> to exit."
-	echo ""
-	echo "If you do not provide a comment, the default will be: "
-	echo "[$COMMENT]"
-
-	echo -n "Comment > "
-	read usercomment
-
-	echo "Sending message to PR..."
-
-	comment="${usercomment:-$COMMENT}"
-	comment="${comment//\\/\\\\}"
-	comment="${comment//\"/\\\"}"
-	comment="$(printf '{"body":"%s"}' "$comment")"
-
-	if ! curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" --user "$TOKEN:x-oauth-basic" --request POST --data "$comment" "https://api.github.com/repos/$REPO/issues/$PRID/comments" || \
-	   ! curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" --user "$TOKEN:x-oauth-basic" --request PATCH --data '{"state":"closed"}' "https://api.github.com/repos/$REPO/pulls/$PRID"
-	then
-		echo ""                                                     >&2
-		echo "Something failed while sending comment to the PR via ">&2
-		echo "the Github API, please review the state manually at " >&2
-		echo "https://github.com/$REPO/pull/$PRID"                  >&2
-		exit 6
-	fi
-fi
-
-echo ""
-echo "The PR has been merged!"
 
 exit 0
