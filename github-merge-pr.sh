@@ -55,8 +55,7 @@ if ! PR_INFO="$(curl -f -s "https://api.github.com/repos/$REPO/pulls/$PRID")"; t
 fi
 
 if [ "$(echo "$PR_INFO" | jq -r ".maintainer_can_modify")" == "false" ]; then
-	echo "PR #$PRID can't be force pushed by maintainers. Can't merge this PR!" >&2
-	exit 4
+	echo "PR #$PRID can't be force pushed by maintainers. Trying to merge as is!" >&2
 fi
 
 if [ "$(echo "$PR_INFO" | jq -r ".mergeable")" == "false" ]; then
@@ -86,83 +85,86 @@ fi
 echo "Fetching remote $PR_USER"
 $GIT fetch $PR_USER
 
-echo "Creating branch $LOCAL_PR_BRANCH for $PR_BRANCH"
-if ! $GIT checkout -b $LOCAL_PR_BRANCH $PR_USER/$PR_BRANCH; then
-	echo "Failed to checkout new branch $PR_BRANCH from $PR_USER/$PR_BRANCH" >&2
-	exit 8
-fi
+if [ "$(echo "$PR_INFO" | jq -r ".maintainer_can_modify")" == "true" ]; then
+	echo "Creating branch $LOCAL_PR_BRANCH for $PR_BRANCH"
+	if ! $GIT checkout -b $LOCAL_PR_BRANCH $PR_USER/$PR_BRANCH; then
+		echo "Failed to checkout new branch $PR_BRANCH from $PR_USER/$PR_BRANCH" >&2
+		exit 8
+	fi
 
-echo "Rebasing $LOCAL_PR_BRANCH on top of $BRANCH"
-if ! $GIT rebase origin/$BRANCH; then
-	echo "Failed to rebase $PR_BRANCH with origin/$BRANCH" >&2
-	exit 9
-fi
+	echo "Rebasing $LOCAL_PR_BRANCH on top of $BRANCH"
+	if ! $GIT rebase origin/$BRANCH; then
+		echo "Failed to rebase $PR_BRANCH with origin/$BRANCH" >&2
+		exit 9
+	fi
 
-echo "Force pushing $LOCAL_PR_BRANCH to HEAD:$PR_BRANCH for $PR_USER"
-if ! $GIT push $PR_USER HEAD:$PR_BRANCH --force; then
-	echo "Failed to force push HEAD to $PR_USER" >&2
-	exit 10
-fi
+	echo "Force pushing $LOCAL_PR_BRANCH to HEAD:$PR_BRANCH for $PR_USER"
+	if ! $GIT push $PR_USER HEAD:$PR_BRANCH --force; then
+		echo "Failed to force push HEAD to $PR_USER" >&2
+		exit 10
+	fi
 
-echo "Returning to $BRANCH"
-$GIT checkout $BRANCH
+	echo "Returning to $BRANCH"
+	$GIT checkout $BRANCH
+fi
 
 if [ -n "$($GIT log origin/$BRANCH..HEAD)" ]; then
 	echo "Working on dirty branch for $BRANCH! Please reset $BRANCH to origin/$BRANCH" >&2
-	exit 10
+	exit 11
 fi
 
 echo "Actually merging the PR #$PRID from branch $PR_USER/$PR_BRANCH"
 if ! $GIT merge --ff-only $PR_USER/$PR_BRANCH; then
 	echo "Failed to merge $PR_USER/$PR_BRANCH on $BRANCH" >&2
-	exit 11
-fi
-
-if yesno "Push to openwrt $BRANCH" "y"; then
-	echo "Pushing to openwrt git server"
-	if ! $GIT push; then
-		echo "Failed to push to $BRANCH but left branch as is." >&2
-		exit 12
-	fi
-
-	# Default close comment
-	COMMENT="Thanks! Rebased on top of $BRANCH and merged!"
-
-	if [ -n "$TOKEN" ] && [ -z "$DRY_RUN" ]; then
-		echo ""
-		echo "Enter a comment and hit <enter> to close the PR at Github automatically now."
-		echo "Hit <ctrl>-<c> to exit."
-		echo ""
-		echo "If you do not provide a comment, the default will be: "
-		echo "[$COMMENT]"
-
-		echo -n "Comment > "
-		read usercomment
-
-		echo "Sending message to PR..."
-
-		comment="${usercomment:-$COMMENT}"
-		comment="${comment//\\/\\\\}"
-		comment="${comment//\"/\\\"}"
-		comment="$(printf '{"body":"%s"}' "$comment")"
-
-		if ! curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" --user "$TOKEN:x-oauth-basic" --request POST --data "$comment" "https://api.github.com/repos/$REPO/issues/$PRID/comments" || \
-		! curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" --user "$TOKEN:x-oauth-basic" --request PATCH --data '{"state":"closed"}' "https://api.github.com/repos/$REPO/pulls/$PRID"
-		then
-			echo ""                                                     >&2
-			echo "Something failed while sending comment to the PR via ">&2
-			echo "the Github API, please review the state manually at " >&2
-			echo "https://github.com/$REPO/pull/$PRID"                  >&2
-			exit 6
+else
+	if yesno "Push to openwrt $BRANCH" "y"; then
+		echo "Pushing to openwrt git server"
+		if ! $GIT push; then
+			echo "Failed to push to $BRANCH but left branch as is." >&2
+			exit 12
 		fi
-	fi
 
-	echo -e "\n"
-	echo "The PR has been merged!"
-	echo -e "\n"
+		# Default close comment
+		COMMENT="Thanks! Rebased on top of $BRANCH and merged!"
+
+		if [ -n "$TOKEN" ] && [ -z "$DRY_RUN" ]; then
+			echo ""
+			echo "Enter a comment and hit <enter> to close the PR at Github automatically now."
+			echo "Hit <ctrl>-<c> to exit."
+			echo ""
+			echo "If you do not provide a comment, the default will be: "
+			echo "[$COMMENT]"
+
+			echo -n "Comment > "
+			read usercomment
+
+			echo "Sending message to PR..."
+
+			comment="${usercomment:-$COMMENT}"
+			comment="${comment//\\/\\\\}"
+			comment="${comment//\"/\\\"}"
+			comment="$(printf '{"body":"%s"}' "$comment")"
+
+			if ! curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" --user "$TOKEN:x-oauth-basic" --request POST --data "$comment" "https://api.github.com/repos/$REPO/issues/$PRID/comments" || \
+			! curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" --user "$TOKEN:x-oauth-basic" --request PATCH --data '{"state":"closed"}' "https://api.github.com/repos/$REPO/pulls/$PRID"
+			then
+				echo ""                                                     >&2
+				echo "Something failed while sending comment to the PR via ">&2
+				echo "the Github API, please review the state manually at " >&2
+				echo "https://github.com/$REPO/pull/$PRID"                  >&2
+				exit 6
+			fi
+		fi
+
+		echo -e "\n"
+		echo "The PR has been merged!"
+		echo -e "\n"
+	fi
 fi
 
-echo "Deleting branch $LOCAL_PR_BRANCH"
-$GIT branch -D $LOCAL_PR_BRANCH
+if [ "$(echo "$PR_INFO" | jq -r ".maintainer_can_modify")" == "true" ]; then
+	echo "Deleting branch $LOCAL_PR_BRANCH"
+	$GIT branch -D $LOCAL_PR_BRANCH
+fi
 
 exit 0
