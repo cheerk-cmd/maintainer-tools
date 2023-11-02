@@ -65,7 +65,7 @@ fi
 
 echo "Pulling current $BRANCH from origin"
 $GIT checkout $BRANCH
-$GIT fetch origin
+$GIT fetch origin $BRANCH
 
 if ! $GIT rebase origin/$BRANCH; then
 	echo "Failed to rebase $BRANCH with origin/$BRANCH" >&2
@@ -83,7 +83,7 @@ if ! $GIT remote get-url $PR_USER &> /dev/null || [ -n "$DRY_RUN" ]; then
 fi
 
 echo "Fetching remote $PR_USER"
-$GIT fetch $PR_USER
+$GIT fetch $PR_USER $PR_BRANCH
 
 if [ "$(echo "$PR_INFO" | jq -r ".maintainer_can_modify")" == "true" ]; then
 	echo "Creating branch $LOCAL_PR_BRANCH for $PR_BRANCH"
