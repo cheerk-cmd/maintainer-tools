@@ -118,6 +118,7 @@ git clone --bare "$PKG_SOURCE_URL" "$TEMP_GIT_DIR" || {
 
 GIT_LOG="$(git -C "$TEMP_GIT_DIR" log \
 	--reverse --no-merges \
+	--abbrev=12 \
 	--format="%h %s" \
 	"$PKG_SOURCE_VERSION..$COMMIT" \
 )" || {
