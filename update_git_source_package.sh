@@ -135,6 +135,46 @@ GIT_DATE_COMMIT=$(git -C "$TEMP_GIT_DIR" log \
 	exit 1
 }
 
+GIT_FIXES="$(
+	IFS=$', \t\n'
+	for issue in $(
+		git -C "$TEMP_GIT_DIR" log \
+			--format="%b" \
+			"$PKG_SOURCE_VERSION..$COMMIT" \
+		| sed -rne 's%^Fixes:(([ ,]*([[:alnum:]_]*#[0-9]+|https?://[^[:space:]]+))+)$%\1%p'
+	); do
+		case "$issue" in
+		http://*|https://*)
+			echo "$issue"
+		;;
+		GH#[0-9]*|openwrt#[0-9]*)
+			echo "https://github.com/openwrt/openwrt/issues/${issue#*#}"
+		;;
+		FS#[0-9]*)
+			echo "https://bugs.openwrt.org/?task_id=${issue#FS#}"
+		;;
+		[a-zA-Z0-9_]*#[0-9]*)
+			echo "https://github.com/openwrt/${issue%#*}/issues/${issue#*#}"
+		;;
+		'#'[0-9]*)
+			case "$PKG_SOURCE_URL" in
+			*://github.com/*)
+				echo "${PKG_SOURCE_URL%/}/issues/${issue#\#}"
+			;;
+			*://git.openwrt.org/project/*)
+				project=${PKG_SOURCE_URL#*://git.openwrt.org/project/}
+				project=${project%.git}
+				echo "https://github.com/openwrt/${project}/issues/${issue#\#}"
+			;;
+			esac
+		;;
+		esac
+	done \
+	| sort --version-sort \
+	| uniq \
+	| sed -e 's#^#Fixes: #'
+)"
+
 sed -i -r \
 	-e "/PKG_SOURCE_VERSION/s#\<$PKG_SOURCE_VERSION\>#${GIT_DATE_COMMIT#* }#" \
 	-e "/PKG_SOURCE_DATE/s#\<$PKG_SOURCE_DATE\>#${GIT_DATE_COMMIT% *}#" \
@@ -169,6 +209,7 @@ git -C "$(dirname "$MAKEFILE")" commit \
 	--signoff --no-edit \
 	--message "$PKG_NAME: update to Git $COMMIT (${GIT_DATE_COMMIT% *})" \
 	--message "$GIT_LOG" \
+	${GIT_FIXES:+--message "$GIT_FIXES"} \
 	"$(basename "$MAKEFILE")"
 
 "$MAKE" --no-print-directory -C "$(dirname "$MAKEFILE")" check || {
