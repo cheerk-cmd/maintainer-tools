@@ -75,6 +75,7 @@ grep -sq BuildPackage "$MAKEFILE" || {
 }
 
 export TOPDIR
+export PATH="$TOPDIR/staging_dir/host/bin:$PATH"
 
 eval $(
 	"$MAKE" --no-print-directory -C "$(dirname "$MAKEFILE")" \
