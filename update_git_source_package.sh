@@ -192,7 +192,7 @@ eval $(
 		var.PKG_SOURCE
 )
 
-"$MAKE" -C "$(dirname "$MAKEFILE")" download || {
+"$MAKE" -C "$(dirname "$MAKEFILE")" download CONFIG_SRC_TREE_OVERRIDE= || {
 	echo "Unable to download and pack updated Git sources." >&2
 	exit 1
 }
